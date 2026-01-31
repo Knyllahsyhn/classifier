@@ -1,7 +1,10 @@
-
+#!/usr/bin/env python3
 """
-WISDM Dataset - Klassifikatorvergleich mit verschiedenen Fenstergrößen
-Untersucht den Einfluss der Zeitfenstergröße auf die Klassifikationsgenauigkeit
+WISDM Dataset - Fenstergrößen-Experiment
+Untersucht: Wie beeinflusst die Fenstergröße (= Reaktionszeit) die Klassifikationsgenauigkeit?
+
+Trainiert auf: WISDM AR Datensatz
+Testet auf: WISDM AT Datensatz (realistischere Daten) - optional
 """
 
 import numpy as np
@@ -11,59 +14,62 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.neural_network import MLPClassifier
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.metrics import accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-from sklearn.inspection import permutation_importance
 from scipy import stats
 import matplotlib.pyplot as plt
 import warnings
 
 warnings.filterwarnings('ignore')
 
-# --- Feature-Namen definieren ---
-FEATURE_NAMES = []
-for axis in ['x', 'y', 'z']:
-    for feat in ['mean', 'std', 'min', 'max', 'range', 'median', 'skew', 'kurtosis', 'rms', 'abs_diff']:
-        FEATURE_NAMES.append(f"{axis}_{feat}")
-FEATURE_NAMES.extend(['mag_mean', 'mag_std', 'mag_range'])
+# =============================================================================
+# KONFIGURATION
+# =============================================================================
 
-# --- Daten laden ---
-print("=" * 60)
-print("WISDM Dataset - Fenstergrößen-Experiment")
-print("=" * 60)
+# Fenstergrößen zum Testen (bei ~20 Hz Samplerate)
+WINDOW_SIZES = [20, 30, 50, 75, 100, 150, 200, 300, 400]
+# Entspricht ca.: 1s, 1.5s, 2.5s, 3.75s, 5s, 7.5s, 10s, 15s, 20s
 
-print("\n[1/4] Lade Rohdaten...")
+STEP_RATIO = 0.5  # 50% Overlap
 
-data = []
-with open("WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt", "r") as f:
-    for line in f:
-        line = line.strip().rstrip(';')
-        if not line:
-            continue
-        parts = line.split(',')
-        if len(parts) == 6:
-            try:
-                user = int(parts[0])
-                activity = parts[1].strip()
-                timestamp = int(parts[2])
-                x = float(parts[3])
-                y = float(parts[4])
-                z = float(parts[5].rstrip(';'))
-                data.append([user, activity, timestamp, x, y, z])
-            except (ValueError, IndexError):
+# Datensatz-Pfade
+TRAIN_DATA_PATH = "WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt"  # AR für Training
+TEST_DATA_PATH = "WISDM_at_v2.0/WISDM_at_v2.0_raw.txt"  # AT für Test
+
+# Auf AT-Datensatz testen
+USE_AT_FOR_TESTING = True  # Auf True setzen für Testing auf ActiTracker-Dataset
+
+SAMPLE_RATE_HZ = 20  # Ungefähre Samplerate des Datensatzes
+
+
+# =============================================================================
+# FUNKTIONEN
+# =============================================================================
+
+def load_wisdm_data(filepath):
+    """Lädt WISDM Rohdaten aus Textdatei"""
+    data = []
+    with open(filepath, "r") as f:
+        for line in f:
+            line = line.strip().rstrip(';')
+            if not line:
                 continue
+            parts = line.split(',')
+            if len(parts) == 6:
+                try:
+                    user = int(parts[0])
+                    activity = parts[1].strip()
+                    timestamp = int(parts[2])
+                    x = float(parts[3])
+                    y = float(parts[4])
+                    z = float(parts[5].rstrip(';'))
+                    data.append([user, activity, timestamp, x, y, z])
+                except (ValueError, IndexError):
+                    continue
+    return pd.DataFrame(data, columns=['user', 'activity', 'timestamp', 'x', 'y', 'z'])
 
-df = pd.DataFrame(data, columns=['user', 'activity', 'timestamp', 'x', 'y', 'z'])
-print(f"  Geladene Datenpunkte: {len(df):,}")
 
-# Aktivitäten anzeigen
-print(f"\n  Aktivitäten:")
-for act, count in df['activity'].value_counts().items():
-    print(f"    {act}: {count:,} ({100 * count / len(df):.1f}%)")
-
-
-# --- Feature-Extraktion Funktion ---
 def extract_features(window):
     """Extrahiert statistische Features aus einem Zeitfenster"""
     features = []
@@ -82,6 +88,7 @@ def extract_features(window):
             np.sum(np.abs(np.diff(values)))
         ])
 
+    # Magnitude Features
     magnitude = np.sqrt(window['x'] ** 2 + window['y'] ** 2 + window['z'] ** 2)
     features.extend([
         np.mean(magnitude),
@@ -92,11 +99,8 @@ def extract_features(window):
     return features
 
 
-def create_dataset(df, window_size, step_size=None):
-    """Erstellt Datensatz mit gegebener Fenstergröße"""
-    if step_size is None:
-        step_size = window_size // 2  # 50% Overlap
-
+def create_dataset(df, window_size, step_size):
+    """Erstellt Feature-Datensatz aus Rohdaten mit gegebener Fenstergröße"""
     X_list = []
     y_list = []
 
@@ -120,206 +124,157 @@ def create_dataset(df, window_size, step_size=None):
     return X, y
 
 
-def evaluate_classifiers(X_train, X_test, y_train, y_test, compute_feature_importance=False):
-    """Evaluiert alle Klassifikatoren und gibt Ergebnisse zurück"""
-
-    # Skalierung
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-
-    classifiers = {
+def get_classifiers():
+    """Gibt Dictionary mit allen Klassifikatoren zurück"""
+    return {
         "k-NN": KNeighborsClassifier(n_neighbors=5),
         "SVM": SVC(kernel='rbf', C=1.0, gamma='scale'),
         "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42, n_jobs=-1),
         "MLP": MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=500, random_state=42, early_stopping=True)
     }
 
-    results = {}
+
+# =============================================================================
+# HAUPTPROGRAMM
+# =============================================================================
+
+print("=" * 70)
+print("WISDM Fenstergrößen-Experiment")
+print("Fragestellung: Ab welcher Reaktionszeit wird die Erkennung unzuverlässig?")
+print("=" * 70)
+
+# --- Daten laden ---
+print("\n[1/3] Lade Trainingsdaten (WISDM AR)...")
+df_train = load_wisdm_data(TRAIN_DATA_PATH)
+print(f"      {len(df_train):,} Datenpunkte geladen")
+
+if USE_AT_FOR_TESTING:
+    print("\n      Lade Testdaten (WISDM AT)...")
+    df_test = load_wisdm_data(TEST_DATA_PATH)
+    print(f"      {len(df_test):,} Datenpunkte geladen")
+
+# --- Experiment durchführen ---
+print("\n[2/3] Starte Experiment...")
+print(f"      Fenstergrößen: {WINDOW_SIZES}")
+print(f"      Reaktionszeiten: {[f'{w / SAMPLE_RATE_HZ:.1f}s' for w in WINDOW_SIZES]}")
+
+results = []
+
+for window_size in WINDOW_SIZES:
+    step_size = int(window_size * STEP_RATIO)
+    reaction_time = window_size / SAMPLE_RATE_HZ
+
+    print(f"\n--- Fenstergröße: {window_size} ({reaction_time:.1f}s) ---")
+
+    # Features extrahieren
+    X_train_full, y_train_full = create_dataset(df_train, window_size, step_size)
+
+    if USE_AT_FOR_TESTING:
+        X_test, y_test = create_dataset(df_test, window_size, step_size)
+        X_train, y_train = X_train_full, y_train_full
+    else:
+        # Train/Test Split auf AR-Datensatz
+        le = LabelEncoder()
+        y_encoded = le.fit_transform(y_train_full)
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_train_full, y_encoded, test_size=0.3, random_state=42, stratify=y_encoded
+        )
+
+    print(f"    Samples - Train: {len(X_train):,}, Test: {len(X_test):,}")
+
+    # Skalierung
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Label Encoding (falls AT-Datensatz)
+    if USE_AT_FOR_TESTING:
+        le = LabelEncoder()
+        le.fit(np.concatenate([y_train, y_test]))
+        y_train = le.transform(y_train)
+        y_test = le.transform(y_test)
+
+    # Klassifikatoren trainieren und evaluieren
+    classifiers = get_classifiers()
 
     for name, clf in classifiers.items():
-        start_train = time.time()
+        start = time.time()
+
         if name == "Random Forest":
             clf.fit(X_train, y_train)
             y_pred = clf.predict(X_test)
         else:
             clf.fit(X_train_scaled, y_train)
             y_pred = clf.predict(X_test_scaled)
-        train_time = time.time() - start_train
 
-        accuracy = accuracy_score(y_test, y_pred)
+        elapsed = time.time() - start
+        acc = accuracy_score(y_test, y_pred)
+        f1 = f1_score(y_test, y_pred, average='weighted')
 
-        # Feature Importance berechnen
-        feature_importance = None
-        if compute_feature_importance:
-            if name == "Random Forest":
-                # Random Forest hat eingebaute Feature Importance
-                feature_importance = clf.feature_importances_
-            else:
-                # Für andere Klassifikatoren: Permutation Importance
-                if name == "Random Forest":
-                    perm_result = permutation_importance(clf, X_test, y_test, n_repeats=10, random_state=42, n_jobs=-1)
-                else:
-                    perm_result = permutation_importance(clf, X_test_scaled, y_test, n_repeats=10, random_state=42,
-                                                         n_jobs=-1)
-                feature_importance = perm_result.importances_mean
-
-        results[name] = {
-            'accuracy': accuracy,
-            'train_time': train_time,
-            'classifier': clf,
-            'feature_importance': feature_importance,
-            'y_pred': y_pred
-        }
-
-    return results, scaler
-
-
-def print_feature_importance(results, top_n=10):
-    """Gibt die Feature Importance für alle Klassifikatoren aus"""
-    print("\n" + "=" * 60)
-    print(f"Feature Importance (Top {top_n})")
-    print("=" * 60)
-
-    for name, metrics in results.items():
-        if metrics['feature_importance'] is not None:
-            print(f"\n--- {name} ---")
-            importances = metrics['feature_importance']
-            indices = np.argsort(importances)[::-1][:top_n]
-            for i, idx in enumerate(indices):
-                print(f"  {i + 1:2}. {FEATURE_NAMES[idx]:15} {importances[idx]:.4f}")
-
-
-# --- Experiment: Verschiedene Fenstergrößen ---
-print("\n[2/4] Starte Fenstergrößen-Experiment...")
-
-window_sizes = [50, 100, 150, 200, 250, 300, 400]
-all_results = []
-
-for window_size in window_sizes:
-    print(f"\n--- Fenstergröße: {window_size} ---")
-
-    # Datensatz erstellen
-    X, y = create_dataset(df, window_size)
-    print(f"  Samples: {len(X):,}")
-
-    # Label Encoding
-    le = LabelEncoder()
-    y_encoded = le.fit_transform(y)
-    activity_labels = {i: name for i, name in enumerate(le.classes_)}
-
-    # Train/Test Split
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y_encoded, test_size=0.3, random_state=42, stratify=y_encoded
-    )
-
-    # Klassifikatoren evaluieren (Feature Importance nur für Fenstergröße 200)
-    compute_fi = (window_size == 200)
-    results, scaler = evaluate_classifiers(X_train, X_test, y_train, y_test, compute_feature_importance=compute_fi)
-
-    for clf_name, metrics in results.items():
-        all_results.append({
+        results.append({
             'window_size': window_size,
-            'classifier': clf_name,
-            'accuracy': metrics['accuracy'],
-            'train_time': metrics['train_time']
+            'reaction_time_s': reaction_time,
+            'classifier': name,
+            'accuracy': acc,
+            'f1_score': f1,
+            'train_time': elapsed,
+            'n_train': len(X_train),
+            'n_test': len(X_test)
         })
-        print(f"  {clf_name}: {100 * metrics['accuracy']:.2f}%")
 
-    # Feature Importance ausgeben (nur für Fenstergröße 200)
-    if compute_fi:
-        print_feature_importance(results)
+        print(f"    {name}: {acc:.4f} ({100 * acc:.1f}%)")
 
-        # Detaillierten Report für besten Klassifikator ausgeben
-        best_clf_name = max(results.keys(), key=lambda k: results[k]['accuracy'])
-        best_metrics = results[best_clf_name]
+# --- Ergebnisse speichern und visualisieren ---
+print("\n[3/3] Ergebnisse...")
 
-        print("\n" + "=" * 60)
-        print(f"Detaillierter Report: {best_clf_name} (Fenstergröße {window_size})")
-        print("=" * 60)
+results_df = pd.DataFrame(results)
+results_df.to_csv('window_size_results.csv', index=False)
+print("      Ergebnisse gespeichert: window_size_results.csv")
 
-        target_names = [activity_labels[i] for i in sorted(activity_labels.keys())]
-        print("\nClassification Report:")
-        print(classification_report(y_test, best_metrics['y_pred'], target_names=target_names))
+# Zusammenfassungstabelle
+print("\n" + "=" * 70)
+print("ZUSAMMENFASSUNG: Accuracy nach Fenstergröße")
+print("=" * 70)
 
-        print("Confusion Matrix:")
-        cm = confusion_matrix(y_test, best_metrics['y_pred'])
-        cm_df = pd.DataFrame(cm, index=target_names, columns=target_names)
-        print(cm_df)
+pivot = results_df.pivot(index='window_size', columns='classifier', values='accuracy')
+pivot['Reaktionszeit'] = pivot.index / SAMPLE_RATE_HZ
+pivot = pivot[['Reaktionszeit', 'k-NN', 'SVM', 'Random Forest', 'MLP']]
+print(pivot.round(4).to_string())
 
-# --- Ergebnisse zusammenfassen ---
-print("\n" + "=" * 60)
-print("[3/4] Ergebnisse Zusammenfassung")
-print("=" * 60)
-
-results_df = pd.DataFrame(all_results)
-
-# Pivot-Tabelle für Übersicht
-pivot_accuracy = results_df.pivot(index='window_size', columns='classifier', values='accuracy')
-print("\nAccuracy nach Fenstergröße (%):")
-print((pivot_accuracy * 100).round(2).to_string())
-
-# Beste Konfiguration pro Klassifikator
-print("\nBeste Fenstergröße pro Klassifikator:")
-for clf_name in ['k-NN', 'SVM', 'Random Forest', 'MLP']:
-    clf_data = results_df[results_df['classifier'] == clf_name]
-    best_idx = clf_data['accuracy'].idxmax()
-    best = clf_data.loc[best_idx]
-    print(f"  {clf_name}: Fenstergröße {int(best['window_size'])} ({100 * best['accuracy']:.2f}%)")
-
-# Beste Gesamtkonfiguration
-best_idx = results_df['accuracy'].idxmax()
-best = results_df.loc[best_idx]
-print(f"\n→ Beste Gesamtkonfiguration: {best['classifier']} mit Fenstergröße {int(best['window_size'])}")
-print(f"  Accuracy: {100 * best['accuracy']:.2f}%")
-
-# --- Visualisierung ---
-print("\n[4/4] Erstelle Visualisierungen...")
-
-# Plot 1: Accuracy vs Fenstergröße
+# --- Plot erstellen ---
 plt.figure(figsize=(10, 6))
-colors = {'k-NN': '#1f77b4', 'SVM': '#ff7f0e', 'Random Forest': '#2ca02c', 'MLP': '#d62728'}
 
-for clf_name in ['k-NN', 'SVM', 'Random Forest', 'MLP']:
-    clf_data = results_df[results_df['classifier'] == clf_name]
-    plt.plot(clf_data['window_size'], clf_data['accuracy'] * 100,
-             marker='o', label=clf_name, color=colors[clf_name], linewidth=2, markersize=8)
+for classifier in ['k-NN', 'SVM', 'Random Forest', 'MLP']:
+    data = results_df[results_df['classifier'] == classifier]
+    plt.plot(data['reaction_time_s'], data['accuracy'], marker='o', label=classifier, linewidth=2)
 
-plt.xlabel('Fenstergröße (Samples)', fontsize=12)
-plt.ylabel('Accuracy (%)', fontsize=12)
-plt.title('Klassifikationsgenauigkeit nach Fenstergröße', fontsize=14)
+plt.xlabel('Reaktionszeit (Sekunden)', fontsize=12)
+plt.ylabel('Accuracy', fontsize=12)
+plt.title('Klassifikationsgenauigkeit vs. Reaktionszeit', fontsize=14)
 plt.legend(loc='lower right')
 plt.grid(True, alpha=0.3)
-plt.xticks(window_sizes)
-plt.ylim(bottom=80)
+plt.ylim(0.5, 1.0)
 
 plt.tight_layout()
 plt.savefig('window_size_comparison.png', dpi=150)
-print("  Plot gespeichert: window_size_comparison.png")
+print("\n      Plot gespeichert: window_size_comparison.png")
 
-# Plot 2: Trainingszeit vs Fenstergröße
-plt.figure(figsize=(10, 6))
+# --- Fazit ---
+print("\n" + "=" * 70)
+print("FAZIT")
+print("=" * 70)
 
-for clf_name in ['k-NN', 'SVM', 'Random Forest', 'MLP']:
-    clf_data = results_df[results_df['classifier'] == clf_name]
-    plt.plot(clf_data['window_size'], clf_data['train_time'],
-             marker='s', label=clf_name, color=colors[clf_name], linewidth=2, markersize=8)
+best_per_window = results_df.loc[results_df.groupby('window_size')['accuracy'].idxmax()]
+worst_window = results_df.groupby('window_size')['accuracy'].mean().idxmin()
+worst_reaction = worst_window / SAMPLE_RATE_HZ
 
-plt.xlabel('Fenstergröße (Samples)', fontsize=12)
-plt.ylabel('Trainingszeit (Sekunden)', fontsize=12)
-plt.title('Trainingszeit nach Fenstergröße', fontsize=14)
-plt.legend(loc='upper right')
-plt.grid(True, alpha=0.3)
-plt.xticks(window_sizes)
+print(f"\nKleinste getestete Reaktionszeit: {WINDOW_SIZES[0] / SAMPLE_RATE_HZ:.1f}s (Fenstergröße {WINDOW_SIZES[0]})")
+print(f"Größte getestete Reaktionszeit:  {WINDOW_SIZES[-1] / SAMPLE_RATE_HZ:.1f}s (Fenstergröße {WINDOW_SIZES[-1]})")
 
-plt.tight_layout()
-plt.savefig('training_time_comparison.png', dpi=150)
-print("  Plot gespeichert: training_time_comparison.png")
+min_acc = results_df[results_df['window_size'] == WINDOW_SIZES[0]].groupby('classifier')['accuracy'].mean()
+max_acc = results_df[results_df['window_size'] == WINDOW_SIZES[-1]].groupby('classifier')['accuracy'].mean()
 
-# Ergebnisse als CSV speichern
-results_df.to_csv('window_size_results.csv', index=False)
-print("  Ergebnisse gespeichert: window_size_results.csv")
-
-print("\n" + "=" * 60)
-print("Fertig!")
-print("=" * 60)
+print(f"\nAccuracy-Verlust (kürzeste vs. längste Reaktionszeit):")
+for clf in ['k-NN', 'SVM', 'Random Forest', 'MLP']:
+    diff = max_acc[clf] - min_acc[clf]
+    print(f"  {clf}: {100 * diff:+.1f} Prozentpunkte")
