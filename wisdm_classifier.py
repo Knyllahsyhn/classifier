@@ -36,7 +36,7 @@ print("=" * 60)
 print("\n[1/4] Lade Rohdaten...")
 
 data = []
-with open("WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt", "r") as f:
+with open("data/WISDM_ar_v1.1/WISDM_ar_v1.1_raw.txt", "r") as f:
     for line in f:
         line = line.strip().rstrip(';')
         if not line:
