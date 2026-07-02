@@ -8,15 +8,6 @@ Vergleich von Klassifikationsverfahren (k-NN, SVM, Random Forest, MLP) zur Human
 
 Praktische Motivation: Ein Smartphone soll in Echtzeit erkennen, welche Aktivität der Nutzer ausführt. Je schneller die Erkennung (kleineres Zeitfenster), desto weniger Sensordaten stehen zur Verfügung. Ab welcher Fenstergröße bricht die Genauigkeit ein?
 
-## Status
-
-- [x] Datensatz laden und verarbeiten
-- [x] Feature-Extraktion (vektorisiert)
-- [x] Experiment A: Variable Trainingssetgröße
-- [x] Experiment B: Konstante Trainingssetgröße
-- [x] Visualisierungen (Heatmaps, Accuracy-Kurven, Confusion Matrices)
-- [x] Feature Importance Analyse
-- [x] Code refactored (Hilfsfunktionen)
 
 ## Datensätze
 
